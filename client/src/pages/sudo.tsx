@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { useAuth } from "@/lib/auth";
@@ -14,7 +14,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "@/components/ui/alert-dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
-import { ArrowLeft, ShieldCheck, UserPlus, FolderPlus, Users, Trash2, Loader2, Eye, EyeOff } from "lucide-react";
+import { ArrowLeft, ShieldCheck, UserPlus, FolderPlus, Users, Trash2, Loader2, Eye, EyeOff, Camera, Wifi, WifiOff, RefreshCw, Upload, Bell } from "lucide-react";
 import type { User, Employee, Group } from "@shared/schema";
 
 interface AdminUser extends User {
@@ -92,6 +92,79 @@ export default function SudoPage() {
     addAdminMutation.mutate(newAdmin);
   };
 
+  const [hikForm, setHikForm] = useState({ ip: "", username: "", password: "", serverUrl: "" });
+  const [hikTestResult, setHikTestResult] = useState<{ connected: boolean; message: string } | null>(null);
+  const [uploadFaceResult, setUploadFaceResult] = useState<any>(null);
+
+  const { data: hikSettings, isLoading: hikLoading } = useQuery<any>({
+    queryKey: ["/api/hikvision/settings"],
+    enabled: user?.role === "sudo",
+  });
+
+  useEffect(() => {
+    if (hikSettings) {
+      setHikForm(f => ({
+        ip: hikSettings.ip || f.ip,
+        username: hikSettings.username || f.username,
+        password: "",
+        serverUrl: hikSettings.serverUrl || f.serverUrl,
+      }));
+    }
+  }, [hikSettings]);
+
+  const saveHikMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/hikvision/settings", hikForm);
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/hikvision/settings"] });
+      toast({ title: "Saqlandi", description: "Kamera sozlamalari saqlandi" });
+    },
+    onError: (err: any) => toast({ title: "Xatolik", description: err.message, variant: "destructive" }),
+  });
+
+  const testHikMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("GET", "/api/hikvision/test");
+      return res.json();
+    },
+    onSuccess: (data) => setHikTestResult(data),
+    onError: () => setHikTestResult({ connected: false, message: "Ulanib bo'lmadi" }),
+  });
+
+  const syncHikMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/hikvision/sync");
+      return res.json();
+    },
+    onSuccess: (data) => {
+      toast({ title: "Sinxronizatsiya", description: `+${data.added?.length ?? 0} qo'shildi, ${data.errors?.length ?? 0} xatolik` });
+    },
+    onError: (err: any) => toast({ title: "Xatolik", description: err.message, variant: "destructive" }),
+  });
+
+  const configureNotifMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/hikvision/configure-notifications");
+      return res.json();
+    },
+    onSuccess: (data) => toast({ title: "Sozlandi", description: data.message }),
+    onError: (err: any) => toast({ title: "Xatolik", description: err.message, variant: "destructive" }),
+  });
+
+  const uploadFacesMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/hikvision/upload-faces");
+      return res.json();
+    },
+    onSuccess: (data) => {
+      setUploadFaceResult(data);
+      toast({ title: "Yuklandi", description: `${data.uploaded?.length ?? 0} ta yuz fotosi yuklandi` });
+    },
+    onError: (err: any) => toast({ title: "Xatolik", description: err.message, variant: "destructive" }),
+  });
+
   return (
     <div className="min-h-screen bg-background">
       <header className="border-b border-border sticky top-0 z-50 bg-background">
@@ -118,10 +191,11 @@ export default function SudoPage() {
 
       <main className="max-w-7xl mx-auto px-4 py-6 space-y-6">
         <Tabs defaultValue="employees" className="w-full">
-          <TabsList className="w-full max-w-md">
+          <TabsList className="w-full">
             <TabsTrigger value="employees" className="flex-1" data-testid="tab-employees">Xodimlar</TabsTrigger>
             <TabsTrigger value="admins" className="flex-1" data-testid="tab-admins">Adminlar</TabsTrigger>
             <TabsTrigger value="groups" className="flex-1" data-testid="tab-groups">Guruhlar</TabsTrigger>
+            <TabsTrigger value="camera" className="flex-1" data-testid="tab-camera">Kamera</TabsTrigger>
           </TabsList>
 
           <TabsContent value="employees" className="mt-4 space-y-3">
@@ -252,6 +326,134 @@ export default function SudoPage() {
                 ))}
               </div>
             )}
+          </TabsContent>
+
+          <TabsContent value="camera" className="mt-4 space-y-4">
+            <h3 className="text-base font-semibold text-foreground flex items-center gap-2">
+              <Camera className="w-4 h-4" /> Hikvision Kamera Sozlamalari
+            </h3>
+
+            <Card>
+              <CardContent className="p-5 space-y-4">
+                <div className="space-y-2">
+                  <Label>Kamera IP manzili</Label>
+                  <Input
+                    value={hikForm.ip}
+                    onChange={e => setHikForm(f => ({ ...f, ip: e.target.value }))}
+                    placeholder="192.168.1.64"
+                    data-testid="input-hik-ip"
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-2">
+                    <Label>Foydalanuvchi nomi</Label>
+                    <Input
+                      value={hikForm.username}
+                      onChange={e => setHikForm(f => ({ ...f, username: e.target.value }))}
+                      placeholder="admin"
+                      data-testid="input-hik-username"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Parol</Label>
+                    <Input
+                      value={hikForm.password}
+                      onChange={e => setHikForm(f => ({ ...f, password: e.target.value }))}
+                      placeholder="••••••••"
+                      type="password"
+                      data-testid="input-hik-password"
+                    />
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <Label>Server URL (callback)</Label>
+                  <Input
+                    value={hikForm.serverUrl}
+                    onChange={e => setHikForm(f => ({ ...f, serverUrl: e.target.value }))}
+                    placeholder="http://89.167.32.140:8181"
+                    data-testid="input-hik-server-url"
+                  />
+                  <p className="text-xs text-muted-foreground">Kamera voqealarni shu manzilga yuboradi (VPS IP + port)</p>
+                </div>
+
+                <div className="flex flex-wrap gap-2 pt-2">
+                  <Button
+                    onClick={() => saveHikMutation.mutate()}
+                    disabled={saveHikMutation.isPending}
+                    data-testid="button-hik-save"
+                  >
+                    {saveHikMutation.isPending && <Loader2 className="w-4 h-4 animate-spin mr-1" />}
+                    Saqlash
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    onClick={() => testHikMutation.mutate()}
+                    disabled={testHikMutation.isPending}
+                    data-testid="button-hik-test"
+                  >
+                    {testHikMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Wifi className="w-4 h-4 mr-1" />}
+                    Test
+                  </Button>
+                </div>
+
+                {hikTestResult && (
+                  <div className={`flex items-center gap-2 p-3 rounded-md text-sm ${hikTestResult.connected ? "bg-green-500/10 text-green-600" : "bg-destructive/10 text-destructive"}`}>
+                    {hikTestResult.connected ? <Wifi className="w-4 h-4" /> : <WifiOff className="w-4 h-4" />}
+                    {hikTestResult.message}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardContent className="p-5 space-y-3">
+                <h4 className="text-sm font-semibold text-foreground">Kamera amallari</h4>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    variant="secondary"
+                    onClick={() => syncHikMutation.mutate()}
+                    disabled={syncHikMutation.isPending}
+                    data-testid="button-hik-sync"
+                  >
+                    {syncHikMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <RefreshCw className="w-4 h-4 mr-1" />}
+                    Davomat sinxronizatsiya
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    onClick={() => configureNotifMutation.mutate()}
+                    disabled={configureNotifMutation.isPending}
+                    data-testid="button-hik-configure"
+                  >
+                    {configureNotifMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Bell className="w-4 h-4 mr-1" />}
+                    Bildirishnoma sozlash
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    onClick={() => uploadFacesMutation.mutate()}
+                    disabled={uploadFacesMutation.isPending}
+                    data-testid="button-hik-upload-faces"
+                  >
+                    {uploadFacesMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Upload className="w-4 h-4 mr-1" />}
+                    Yuz fotosin yuklash
+                  </Button>
+                </div>
+                <div className="text-xs text-muted-foreground space-y-1">
+                  <p><strong>Davomat sinxronizatsiya</strong> — kameradagi kirish/chiqish loglarni tizimga yuklaydi</p>
+                  <p><strong>Bildirishnoma sozlash</strong> — kamerani real-vaqt voqealar yuborishi uchun sozlaydi</p>
+                  <p><strong>Yuz fotosi yuklash</strong> — xodimlar fotosinini kameraga yuklaydi (Face ID)</p>
+                </div>
+
+                {uploadFaceResult && (
+                  <div className="p-3 bg-muted rounded-md text-xs space-y-1">
+                    <p className="font-medium">Natija:</p>
+                    <p>Yuklandi: {uploadFaceResult.uploaded?.length ?? 0} ta</p>
+                    {uploadFaceResult.errors?.length > 0 && (
+                      <p className="text-destructive">Xatolik: {uploadFaceResult.errors?.length} ta</p>
+                    )}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
           </TabsContent>
         </Tabs>
       </main>
