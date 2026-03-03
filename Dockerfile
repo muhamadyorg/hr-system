@@ -4,7 +4,6 @@ COPY package*.json ./
 RUN npm install
 COPY client/ ./client/
 COPY shared/ ./shared/
-COPY attached_assets/ ./attached_assets/
 COPY vite.config.ts tsconfig.json tailwind.config.ts postcss.config.js components.json ./
 RUN npx vite build
 
