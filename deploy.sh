@@ -1,7 +1,5 @@
 #!/bin/bash
 
-set -euo pipefail
-
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -13,12 +11,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 CANDIDATE_PORTS=(17463 23891 34572 41239 52847 44821 38456 29173 56392 47215)
+LOG_FILE="/tmp/hr-deploy.log"
 
-log()    { echo -e "${BLUE}[INFO]${NC}  $*"; }
-ok()     { echo -e "${GREEN}[OK]${NC}    $*"; }
-warn()   { echo -e "${YELLOW}[WARN]${NC}  $*"; }
-error()  { echo -e "${RED}[ERROR]${NC} $*"; }
+log()    { echo -e "${BLUE}[INFO]${NC}  $*" | tee -a "$LOG_FILE"; }
+ok()     { echo -e "${GREEN}[OK]${NC}    $*" | tee -a "$LOG_FILE"; }
+warn()   { echo -e "${YELLOW}[WARN]${NC}  $*" | tee -a "$LOG_FILE"; }
+err()    { echo -e "${RED}[ERROR]${NC} $*" | tee -a "$LOG_FILE"; }
 banner() { echo -e "${CYAN}$*${NC}"; }
+
+echo "" > "$LOG_FILE"
 
 banner "
 ╔══════════════════════════════════════╗
@@ -27,241 +28,264 @@ banner "
 ╚══════════════════════════════════════╝
 "
 
-#───────────────────────────────────────
-# 1. Docker tekshirish / o'rnatish
-#───────────────────────────────────────
+# ─────────────────────────────────────
+# 1. Docker o'rnatish
+# ─────────────────────────────────────
 install_docker() {
-    warn "Docker topilmadi. O'rnatilmoqda..."
-    if command -v apt-get &>/dev/null; then
-        apt-get update -qq
-        apt-get install -y -qq ca-certificates curl gnupg lsb-release
+    warn "Docker o'rnatilmoqda..."
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get update -qq 2>>"$LOG_FILE"
+        apt-get install -y -qq ca-certificates curl gnupg 2>>"$LOG_FILE"
         install -m 0755 -d /etc/apt/keyrings
         curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
             | gpg --dearmor -o /etc/apt/keyrings/docker.gpg 2>/dev/null
         chmod a+r /etc/apt/keyrings/docker.gpg
         echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
-https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
+https://download.docker.com/linux/ubuntu $(lsb_release -cs 2>/dev/null || echo jammy) stable" \
             > /etc/apt/sources.list.d/docker.list
-        apt-get update -qq
-        apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-    elif command -v yum &>/dev/null; then
-        yum install -y -q yum-utils
+        apt-get update -qq 2>>"$LOG_FILE"
+        apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin 2>>"$LOG_FILE"
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y -q yum-utils 2>>"$LOG_FILE"
         yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
-        yum install -y -q docker-ce docker-ce-cli containerd.io docker-compose-plugin
+        yum install -y -q docker-ce docker-ce-cli containerd.io docker-compose-plugin 2>>"$LOG_FILE"
     else
-        curl -fsSL https://get.docker.com | sh
+        curl -fsSL https://get.docker.com | sh >>"$LOG_FILE" 2>&1
     fi
     systemctl enable docker 2>/dev/null || true
     systemctl start docker 2>/dev/null || true
-    ok "Docker o'rnatildi"
+    sleep 3
 }
 
-if ! command -v docker &>/dev/null; then
+if ! command -v docker >/dev/null 2>&1; then
     install_docker
-else
-    ok "Docker mavjud: $(docker --version)"
 fi
 
-#───────────────────────────────────────
-# 2. Docker Compose komandasi aniqlash
-#───────────────────────────────────────
-if docker compose version &>/dev/null 2>&1; then
+if ! docker info >/dev/null 2>&1; then
+    warn "Docker daemon ishlamayapti, qayta ishga tushirilmoqda..."
+    systemctl start docker 2>/dev/null || service docker start 2>/dev/null || true
+    sleep 5
+fi
+
+if ! docker info >/dev/null 2>&1; then
+    err "Docker ishga tushmadi. Loglar: $LOG_FILE"
+    exit 1
+fi
+ok "Docker: $(docker --version)"
+
+# ─────────────────────────────────────
+# 2. Docker Compose
+# ─────────────────────────────────────
+if docker compose version >/dev/null 2>&1; then
     COMPOSE="docker compose"
-    ok "Docker Compose: $(docker compose version --short 2>/dev/null || echo 'ok')"
-elif command -v docker-compose &>/dev/null; then
+elif command -v docker-compose >/dev/null 2>&1; then
     COMPOSE="docker-compose"
-    ok "docker-compose mavjud"
 else
     warn "Docker Compose o'rnatilmoqda..."
-    curl -SL "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" \
-        -o /usr/local/bin/docker-compose
+    COMPOSE_URL="https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)"
+    curl -SL "$COMPOSE_URL" -o /usr/local/bin/docker-compose 2>>"$LOG_FILE"
     chmod +x /usr/local/bin/docker-compose
     COMPOSE="docker-compose"
-    ok "docker-compose o'rnatildi"
 fi
+ok "Compose: $($COMPOSE version --short 2>/dev/null || echo 'ok')"
 
-#───────────────────────────────────────
+# ─────────────────────────────────────
 # 3. Bosh port topish
-#───────────────────────────────────────
-find_free_port() {
-    for port in "${CANDIDATE_PORTS[@]}"; do
-        if ! (ss -tln 2>/dev/null || netstat -tln 2>/dev/null) | grep -q ":${port}[[:space:]]"; then
-            if ! docker ps --format "{{.Ports}}" 2>/dev/null | grep -q ":${port}->"; then
-                echo "$port"
-                return 0
-            fi
-        fi
-    done
-    return 1
+# ─────────────────────────────────────
+is_port_free() {
+    local port=$1
+    # Try multiple methods
+    if command -v ss >/dev/null 2>&1; then
+        ss -tln | grep -q ":${port} " && return 1
+    elif command -v netstat >/dev/null 2>&1; then
+        netstat -tln | grep -q ":${port} " && return 1
+    else
+        (echo >/dev/tcp/127.0.0.1/"$port") 2>/dev/null && return 1
+    fi
+    # Also check docker
+    docker ps --format "{{.Ports}}" 2>/dev/null | grep -q ":${port}->" && return 1
+    return 0
 }
 
-#───────────────────────────────────────
-# 4. .env fayl yaratish / yangilash
-#───────────────────────────────────────
+# ─────────────────────────────────────
+# 4. .env fayl
+# ─────────────────────────────────────
 if [ -f .env ]; then
-    warn ".env fayl mavjud, o'qilmoqda..."
-    source .env 2>/dev/null || true
+    warn ".env mavjud, ishlatilmoqda..."
+    set -a; source .env; set +a
 
     if [ -z "${APP_PORT:-}" ]; then
-        APP_PORT=$(find_free_port) || { error "Barcha portlar band!"; exit 1; }
-        echo "APP_PORT=${APP_PORT}" >> .env
-        warn "APP_PORT .env ga qo'shildi: ${APP_PORT}"
+        for port in "${CANDIDATE_PORTS[@]}"; do
+            if is_port_free "$port"; then
+                APP_PORT="$port"
+                echo "APP_PORT=${APP_PORT}" >> .env
+                warn "APP_PORT qo'shildi: ${APP_PORT}"
+                break
+            fi
+        done
     fi
-
     if [ -z "${SESSION_SECRET:-}" ]; then
-        SESSION_SECRET=$(head -c 48 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 48)
+        SESSION_SECRET=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | head -c 48)
         echo "SESSION_SECRET=${SESSION_SECRET}" >> .env
-        warn "SESSION_SECRET .env ga qo'shildi"
     fi
 else
-    log ".env fayl yaratilmoqda..."
+    log ".env yaratilmoqda..."
+    for port in "${CANDIDATE_PORTS[@]}"; do
+        if is_port_free "$port"; then
+            APP_PORT="$port"
+            break
+        fi
+    done
 
-    APP_PORT=$(find_free_port) || { error "Barcha portlar band!"; exit 1; }
-    SESSION_SECRET=$(head -c 48 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 48)
-    POSTGRES_PASS=$(head -c 24 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 24)
+    if [ -z "${APP_PORT:-}" ]; then
+        err "Barcha 10 port band. /tmp/hr-deploy.log ga qarang."
+        exit 1
+    fi
+
+    SESSION_SECRET=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | head -c 48)
+    POSTGRES_PASSWORD=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | head -c 24)
 
     cat > .env <<EOF
 APP_PORT=${APP_PORT}
 SESSION_SECRET=${SESSION_SECRET}
 POSTGRES_DB=hr_system
 POSTGRES_USER=hr_user
-POSTGRES_PASSWORD=${POSTGRES_PASS}
+POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
 EOF
-    ok ".env fayl yaratildi (port: ${APP_PORT})"
+    ok ".env yaratildi"
 fi
 
-source .env
-APP_PORT="${APP_PORT}"
+set -a; source .env; set +a
+ok "Port: ${APP_PORT}"
 
-ok "Tanlangan port: ${APP_PORT}"
-
-#───────────────────────────────────────
+# ─────────────────────────────────────
 # 5. Eski konteynerlarni to'xtatish
-#───────────────────────────────────────
-RUNNING=$($COMPOSE ps --services --filter "status=running" 2>/dev/null || echo "")
-if [ -n "$RUNNING" ]; then
+# ─────────────────────────────────────
+if $COMPOSE ps 2>/dev/null | grep -qE "Up|running|Exit"; then
     warn "Eski konteynerlar to'xtatilmoqda..."
-    $COMPOSE down --remove-orphans 2>/dev/null || true
+    $COMPOSE down --remove-orphans --timeout 30 2>>"$LOG_FILE" || true
+    sleep 3
     ok "Eski konteynerlar to'xtatildi"
 fi
 
-#───────────────────────────────────────
-# 6. Build qilish
-#───────────────────────────────────────
-log "Docker image build qilinmoqda (5-15 daqiqa ketishi mumkin)..."
-log "Sabr qiling..."
+# ─────────────────────────────────────
+# 6. Build
+# ─────────────────────────────────────
+log "Image build qilinmoqda (10-20 daqiqa ketishi mumkin)..."
+log "Log fayli: $LOG_FILE"
 
-BUILD_ATTEMPTS=0
-MAX_BUILD_ATTEMPTS=3
-
-while [ $BUILD_ATTEMPTS -lt $MAX_BUILD_ATTEMPTS ]; do
-    BUILD_ATTEMPTS=$((BUILD_ATTEMPTS + 1))
-
-    if $COMPOSE build --no-cache 2>&1 | tee /tmp/hr_build.log | grep -E "^(Step|#|Successfully|ERROR|error)" ; then
-        ok "Build muvaffaqiyatli tugadi"
+BUILD_OK=0
+for attempt in 1 2 3; do
+    log "Build urinish $attempt/3..."
+    if $COMPOSE build --no-cache >> "$LOG_FILE" 2>&1; then
+        BUILD_OK=1
+        ok "Build muvaffaqiyatli (urinish $attempt)"
         break
     else
-        BUILD_EXIT=${PIPESTATUS[0]}
-        if [ $BUILD_EXIT -ne 0 ] && [ $BUILD_ATTEMPTS -lt $MAX_BUILD_ATTEMPTS ]; then
-            warn "Build xatoligi, qayta urinilmoqda ($BUILD_ATTEMPTS/$MAX_BUILD_ATTEMPTS)..."
-            sleep 5
-        elif [ $BUILD_EXIT -ne 0 ]; then
-            error "Build $MAX_BUILD_ATTEMPTS marta urinishdan keyin ham muvaffaqiyatsiz:"
-            tail -30 /tmp/hr_build.log
-            exit 1
-        else
-            ok "Build muvaffaqiyatli tugadi"
-            break
+        err "Build xatosi (urinish $attempt/3). Sabab:"
+        tail -20 "$LOG_FILE" | grep -E "error|Error|ERROR|failed|FAILED" | head -10 || true
+        if [ "$attempt" -lt 3 ]; then
+            warn "30 soniyadan keyin qayta uriniladi..."
+            sleep 30
         fi
     fi
 done
 
-#───────────────────────────────────────
+if [ "$BUILD_OK" -eq 0 ]; then
+    err "Build 3 urinishdan keyin ham muvaffaqiyatsiz tugadi!"
+    err "To'liq loglar: $LOG_FILE"
+    echo ""
+    err "=== OXIRGI 50 QATOR LOG ==="
+    tail -50 "$LOG_FILE"
+    exit 1
+fi
+
+# ─────────────────────────────────────
 # 7. Ishga tushirish
-#───────────────────────────────────────
+# ─────────────────────────────────────
 log "Konteynerlar ishga tushirilmoqda..."
+if ! $COMPOSE up -d >> "$LOG_FILE" 2>&1; then
+    err "Konteynerlar ishga tushmadi"
+    $COMPOSE logs --tail=50
+    exit 1
+fi
 
-$COMPOSE up -d 2>&1
+# ─────────────────────────────────────
+# 8. Sog'liqni tekshirish
+# ─────────────────────────────────────
+log "Tizim tayyorlanmoqda (max 120 soniya)..."
 
-#───────────────────────────────────────
-# 8. Tayyorligini kutish va tekshirish
-#───────────────────────────────────────
-log "Tizim tayyorlanmoqda, iltimos kuting..."
-
-MAX_WAIT=90
-ELAPSED=0
-INTERVAL=5
-
-while [ $ELAPSED -lt $MAX_WAIT ]; do
-    sleep $INTERVAL
-    ELAPSED=$((ELAPSED + INTERVAL))
-
-    APP_STATUS=$($COMPOSE ps --format json 2>/dev/null | grep -c '"State":"running"' || \
-                 $COMPOSE ps 2>/dev/null | grep -c "Up" || echo "0")
-
-    if [ "$APP_STATUS" -ge 2 ]; then
+READY=0
+for i in $(seq 1 24); do
+    sleep 5
+    UP_COUNT=$($COMPOSE ps 2>/dev/null | grep -cE "Up|running" || echo 0)
+    if [ "$UP_COUNT" -ge 2 ]; then
         HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
             "http://127.0.0.1:${APP_PORT}/" \
-            --max-time 5 --connect-timeout 5 2>/dev/null || echo "000")
-
-        if [[ "$HTTP_CODE" == "200" || "$HTTP_CODE" == "302" || "$HTTP_CODE" == "301" ]]; then
-            ok "Tizim javob bermoqda (HTTP ${HTTP_CODE})"
+            --max-time 5 --connect-timeout 3 2>/dev/null || echo "000")
+        if [[ "$HTTP_CODE" =~ ^(200|301|302|304)$ ]]; then
+            READY=1
+            ok "Tizim ishlayapti! HTTP ${HTTP_CODE}"
             break
         fi
-        log "HTTP javob kutilmoqda... (${ELAPSED}/${MAX_WAIT}s)"
+        log "Kutilmoqda... konteynerlar: $UP_COUNT, HTTP: $HTTP_CODE (${i}/24)"
     else
-        log "Konteynerlar ishga tushmoqda... (${ELAPSED}/${MAX_WAIT}s)"
+        log "Konteynerlar ishga tushmoqda... ($UP_COUNT tayyor, ${i}/24)"
     fi
 done
 
-#───────────────────────────────────────
-# 9. Yakuniy holat tekshirish
-#───────────────────────────────────────
-log "Yakuniy tekshiruv..."
-$COMPOSE ps
+# ─────────────────────────────────────
+# 9. Konteynerlar to'xta qolsa — restart
+# ─────────────────────────────────────
+if [ "$READY" -eq 0 ]; then
+    warn "Konteynerlar javob bermayapti, restart qilinmoqda..."
+    $COMPOSE restart 2>>"$LOG_FILE" || true
+    sleep 20
 
-CONTAINERS_UP=$($COMPOSE ps 2>/dev/null | grep -c "Up\|running" || echo "0")
+    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+        "http://127.0.0.1:${APP_PORT}/" \
+        --max-time 10 --connect-timeout 5 2>/dev/null || echo "000")
 
-if [ "$CONTAINERS_UP" -lt 2 ]; then
-    error "Ba'zi konteynerlar ishlamayapti. Loglar:"
-    $COMPOSE logs --tail=50
-
-    warn "Qayta ishga tushirilmoqda..."
-    $COMPOSE restart 2>/dev/null || true
-    sleep 15
-
-    CONTAINERS_UP=$($COMPOSE ps 2>/dev/null | grep -c "Up\|running" || echo "0")
-    if [ "$CONTAINERS_UP" -lt 2 ]; then
-        error "Tizim ishga tushmadi. Batafsil loglar:"
-        $COMPOSE logs
+    if [[ "$HTTP_CODE" =~ ^(200|301|302|304)$ ]]; then
+        READY=1
+        ok "Restart dan keyin ishlayapti! HTTP ${HTTP_CODE}"
+    else
+        err "Tizim restart dan keyin ham javob bermadi (HTTP: $HTTP_CODE)"
+        err ""
+        err "Konteyner holati:"
+        $COMPOSE ps
+        err ""
+        err "App loglari:"
+        $COMPOSE logs app --tail=30 2>/dev/null || $COMPOSE logs --tail=30
+        err ""
+        err "To'liq loglar: $LOG_FILE"
         exit 1
     fi
 fi
 
-#───────────────────────────────────────
+# ─────────────────────────────────────
 # 10. Natija
-#───────────────────────────────────────
+# ─────────────────────────────────────
 SERVER_IP=$(curl -s --max-time 5 ifconfig.me 2>/dev/null \
     || curl -s --max-time 5 api.ipify.org 2>/dev/null \
     || hostname -I 2>/dev/null | awk '{print $1}' \
     || echo "SERVER_IP")
 
 banner "
-╔══════════════════════════════════════════════════╗
-║        HR TIZIM MUVAFFAQIYATLI ISHGA TUSHDI!    ║
-╠══════════════════════════════════════════════════╣
-║  URL     : http://${SERVER_IP}:${APP_PORT}
-║  Login   : sudo    / sudo123                     ║
-║  Login   : admin   / admin123                    ║
-╠══════════════════════════════════════════════════╣
-║  Subdomain ulash uchun:                          ║
-║  DNS A-record → ${SERVER_IP}             ║
-║  Nginx/Apache proxy → port ${APP_PORT}           ║
-╚══════════════════════════════════════════════════╝
+╔═══════════════════════════════════════════════════╗
+║      HR TIZIM MUVAFFAQIYATLI ISHGA TUSHDI!       ║
+╠═══════════════════════════════════════════════════╣
+║  URL   : http://${SERVER_IP}:${APP_PORT}
+║  Login : sudo  / sudo123                          ║
+║  Login : admin / admin123                         ║
+╠═══════════════════════════════════════════════════╣
+║  Subdomain uchun reverse proxy:                   ║
+║  Target: http://127.0.0.1:${APP_PORT}             ║
+╚═══════════════════════════════════════════════════╝
 
-Foydali komandalar:
-  Loglar ko'rish : $COMPOSE logs -f
-  To'xtatish     : $COMPOSE down
-  Qayta boshlash : $COMPOSE restart
-  Holat          : $COMPOSE ps
+Komandalar:
+  Loglar  : $COMPOSE logs -f
+  To'xtat : $COMPOSE down
+  Restart : $COMPOSE restart
+  Holat   : $COMPOSE ps
 "
